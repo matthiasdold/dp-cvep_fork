@@ -1,10 +1,10 @@
-from git import Repo
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import toml
+from git import Repo
 
 # The name of the folder that is to be created to store all the modules
 SETUP_FOLDER_NAME = "cvep_speller_env"
@@ -14,6 +14,7 @@ CONTROL_ROOM_URL = "git@github.com:bsdlab/dp-control-room.git"
 DECODER_URL = "git@github.com:thijor/dp-cvep-decoder.git"
 SPELLER_URL = "git@github.com:thijor/dp-cvep-speller.git"
 LSL_URL = "git@github.com:bsdlab/dp-lsl-recording.git"
+MOCKUP_URL = "git@github.com:bsdlab/dp-mockup-streamer.git"  # Mockup streamer is used for pure offline testing and debugging
 
 EEG_LSL_STREAM_NAME = "BioSemi"
 MARKER_LSL_STREAM_NAME = "cvep-speller-stream"
@@ -49,9 +50,15 @@ except FileExistsError:
 
 # SSH ide via the Repo.clone_from did not work -> use manual subprocess calls
 repos = []
-repo_dirs = ["dp-control-room", "dp-cvep-decoder", "dp-cvep-speller", "dp-lsl-recording"]
-for url, repo_dir in zip([CONTROL_ROOM_URL, DECODER_URL, SPELLER_URL, LSL_URL], repo_dirs):
-    cmd = f'git clone -v -- {url} {SETUP_FOLDER_NAME}/{repo_dir}'
+repo_dirs = {
+    "dp-control-room": CONTROL_ROOM_URL,
+    "dp-cvep-decoder": DECODER_URL,
+    "dp-cvep-speller": SPELLER_URL,
+    "dp-lsl-recording": LSL_URL,
+    "dp-mockup-streamer": MOCKUP_URL,
+}
+for url, repo_dir in repo_dirs.items():
+    cmd = f"git clone -v -- {url} {SETUP_FOLDER_NAME}/{repo_dir}"
     subprocess.run(cmd, shell=True)
     repos.append(Repo(root_dir / repo_dir))
 
@@ -148,7 +155,102 @@ control_room_cfg_pth = Path(
 with open(control_room_cfg_pth, "w") as f:
     f.write(control_room_cfg)
 
-#
+
+# ------------------------ Add a mockup only config ---------------------------
+control_room_mockup_cfg = f"""
+
+[python]
+modules_root = '../'                                                            
+
+
+# -------------------- Cvep Decoder  ----------------------------------------
+[python.modules.dp-cvep-decoder]                                        
+    type = 'decoding'
+    port = 8083
+    ip = '127.0.0.1'
+
+# -------------------- Controller  ----------------------------------------- 
+[python.modules.dp-cvep-speller]                                     
+    type = 'paradigm'
+    port = 8084
+    ip = '127.0.0.1'
+    retry_connection_after_s = 5  # Module start-up is very slow due to psychopy
+
+# -------------------- LSL recording -----------------------------------------
+[python.modules.dp-lsl-recording]                                      
+    type = 'recording'
+    port = 8082                                                                 
+    ip = '127.0.0.1'
+
+# -------------------- Mockup streamer -----------------------------------------
+[python.modules.dp-mocup-streamer]                                      
+    type = 'recording'
+    port = 8085                                                                 
+    ip = '127.0.0.1'
+
+
+[macros]
+
+# This is created as a macro as it makes creation of default parameters simpler
+# you could use the plain START_RANDOM button as well
+[macros.start_mockup]
+    name = 'RUN MOCKUP EEG'
+    description = 'Starting the mockup streamer for offline testing'
+
+[macros.start_mockup.default_json]
+    mockup_stream_name = 'BioSemi'
+    sfreq = 512
+
+[macros.start_mockup.cmds]
+    com1 = ['dp-mockup-streamer', 'START_RANDOM', 'stream_name=mockup_stream_name', 'sfreq=512']
+
+[macros.stop_mockup]
+    name = 'STOP MOCKUP EEG'
+[macros.start_mockup.cmds]
+    com1 = ['dp-mockup-streamer', 'STOP']
+
+
+[macros]
+
+[macros.run_training]
+    name = 'RUN TRAINING'
+    description = 'Start the recording of training data'
+[macros.run_training.default_json]
+    fname = 'sub-P001_ses-S001_run-001_task-training'
+    data_root = '{str(DATA_DIR.resolve())}'
+    delay_s = 0.5                  # delay inbetween commands -> time for LSL recorder to respond
+[macros.run_training.cmds]
+    # [<target_module>, <PCOMM>, <kwarg_name1 (optional)>, <kwarg_name2 (optional)>]
+    com1 = ['dp-lsl-recording', 'UPDATE']
+    com2 = ['dp-lsl-recording', 'SELECT_ALL']
+    com3 = ['dp-lsl-recording', 'SET_SAVE_PATH', 'fname=fname', 'data_root=data_root']
+    com4 = ['dp-lsl-recording', 'RECORD']
+
+[macros.stop_streaming]
+    name = 'STOP LSL RECORDING'
+    description = 'Stop the recording'
+[macros.stop_streaming.cmds]
+    com1 = ['dp-lsl-recording', 'STOPRECORD']
+
+[macros.run_online]
+    name = 'RUN ONLINE'
+    description = 'Start the recording of online data'
+[macros.run_online.default_json]
+    fname = 'sub-P001_ses-S001_run-001_task-online'
+    data_root = '{str(DATA_DIR.resolve())}' 
+[macros.run_online.cmds]
+    # [<target_module>, <PCOMM>, <kwarg_name1 (optional)>, <kwarg_name2 (optional)>]
+    com1 = ['dp-lsl-recording', 'UPDATE']
+    com2 = ['dp-lsl-recording', 'SELECT_ALL']
+    com3 = ['dp-lsl-recording', 'SET_SAVE_PATH', 'fname=fname', 'data_root=data_root']
+    com4 = ['dp-lsl-recording', 'RECORD']
+    com5 = ['dp-cvep-decoder', 'DECODE ONLINE']
+
+"""
+with open(control_room_cfg_pth, "w") as f:
+    f.write(control_room_cfg)
+
+
 # >>> for dp-cvep-decoder
 #
 
@@ -157,19 +259,25 @@ cfg = toml.load(decoder_cfg_pth)
 
 cfg["cvep"]["capfile"] = str(CAP_FILE.resolve())
 
-cfg["training"]["out_file"] = str(DATA_DIR.joinpath(
-    "./dp-cvep/sub-P001_ses-S001_classifier.joblib"
-).resolve())
-cfg["training"]["out_file_meta"] = str(DATA_DIR.joinpath(
-    "./dp-cvep/sub-P001_ses-S001_classifier.meta.json"
-).resolve())
+cfg["training"]["out_file"] = str(
+    DATA_DIR.joinpath("./dp-cvep/sub-P001_ses-S001_classifier.joblib").resolve()
+)
+cfg["training"]["out_file_meta"] = str(
+    DATA_DIR.joinpath("./dp-cvep/sub-P001_ses-S001_classifier.meta.json").resolve()
+)
 cfg["training"]["data_root"] = str(DATA_DIR.resolve())
 cfg["training"]["codes_file"] = str(CODES_FILE.resolve())
 
 cfg["training"]["features"]["data_stream_name"] = EEG_LSL_STREAM_NAME
 cfg["training"]["features"]["lsl_marker_stream_name"] = MARKER_LSL_STREAM_NAME
 cfg["training"]["features"]["selected_channels"] = [
-    "EX1", "EX2", "EX3", "EX4", "EX5", "EX6", "EX7",
+    "EX1",
+    "EX2",
+    "EX3",
+    "EX4",
+    "EX5",
+    "EX6",
+    "EX7",
 ]
 
 cfg["training"]["decoder"]["event"] = "duration"
@@ -177,17 +285,25 @@ cfg["training"]["decoder"]["encoding_length_s"] = 0.3
 cfg["training"]["decoder"]["tmin_s"] = 0.1
 cfg["training"]["decoder"]["target_accuracy"] = 0.999
 
-cfg["online"]["classifier"]["file"] = str(DATA_DIR.joinpath(
-    "./dp-cvep/sub-P001_ses-S001_classifier.early_stop.joblib"
-).resolve())
-cfg["online"]["classifier"]["meta_file"] = str(DATA_DIR.joinpath(
-    "./dp-cvep/sub-P001_ses-S001_classifier.meta.json"
-).resolve())
+cfg["online"]["classifier"]["file"] = str(
+    DATA_DIR.joinpath(
+        "./dp-cvep/sub-P001_ses-S001_classifier.early_stop.joblib"
+    ).resolve()
+)
+cfg["online"]["classifier"]["meta_file"] = str(
+    DATA_DIR.joinpath("./dp-cvep/sub-P001_ses-S001_classifier.meta.json").resolve()
+)
 
 cfg["online"]["input"]["lsl_stream_name"] = EEG_LSL_STREAM_NAME
 cfg["online"]["input"]["lsl_marker_stream_name"] = MARKER_LSL_STREAM_NAME
 cfg["online"]["input"]["selected_channels"] = [
-    "EX1", "EX2", "EX3", "EX4", "EX5", "EX6", "EX7",
+    "EX1",
+    "EX2",
+    "EX3",
+    "EX4",
+    "EX5",
+    "EX6",
+    "EX7",
 ]
 
 cfg["online"]["output"]["lsl_stream_name"] = DECODER_OUTPUT_LSL_STREAM_NAME
